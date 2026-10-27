@@ -7,8 +7,8 @@
 const CONFIG = {
   eventName: 'ALGOVERSE 2026',
   phaseName: 'Tech Nova',        // shown in header + rules card
-  roundName: 'Round 1',          // shown on rules card
-  durationMinutes: 20,           // quiz timer (counts down, auto-submits at 00:00)
+  roundName: 'Technomyst',       // shown on rules card
+  durationMinutes: 30,           // quiz timer (counts down, auto-submits at 00:00)
   showScoreAfterSubmit: true     // set false to hide the score after submission
 };
 
@@ -135,16 +135,20 @@ const LETTERS = ['A', 'B', 'C', 'D'];
 const TOTAL = QUESTIONS.length;
 const TOTAL_SECONDS = CONFIG.durationMinutes * 60;
 const RING_LEN = 2 * Math.PI * 16;
+const STORAGE_KEY = 'technova-2nd-year-session-v1';
 
 const state = {
   current: 0,
   answers: new Array(TOTAL).fill(-1),
   flagged: new Set(),
+  teamName: '',
   started: false,
   submitted: false,
   startTime: 0,
   endTime: 0,
   timerId: null,
+  expiryId: null,
+  result: null,
   warnedHalf: false,
   warned1: false
 };
@@ -228,7 +232,7 @@ function setupIntro() {
 
   const rules = [
     `This quiz is only for <b>2nd Year</b> students. It has <b>${TOTAL} multiple-choice questions</b> in ${SECTIONS.length} sections: DSA (2 parts), COA, Python, Maths and Economics.`,
-    `Every question has <b>four options (A–D)</b> and only <b>one</b> is correct. Each correct answer earns <b>1 mark</b>.`,
+    `Every question has <b>four options (A–D)</b> and only <b>one</b> is correct. Each correct answer earns <b>4 marks</b>, each incorrect answer loses <b>1 mark</b>, and unanswered questions earn <b>0 marks</b>.`,
     `You have <b>${CONFIG.durationMinutes} minutes</b>. The timer starts the moment you press <b>Enter Quiz</b> and the test is <b>auto-submitted</b> at 00:00.`,
     `Jump between sections and questions freely. You can <b>change an answer</b> or <b>flag a question</b> for review before submitting.`,
     `Do <b>not</b> refresh, go back or close this page during the test.`,
@@ -256,13 +260,30 @@ function setupIntro() {
 /* ------------------ START ------------------ */
 function startQuiz() {
   if (state.started) return;
+  if (!$('studentDetails').reportValidity()) return;
+  state.teamName = $('teamName').value.trim();
+  if (!state.teamName) {
+    $('teamName').focus();
+    toast('Please enter your team name.');
+    return;
+  }
+  $('teamName').value = state.teamName;
   state.started = true;
   state.startTime = Date.now();
   state.endTime = state.startTime + TOTAL_SECONDS * 1000;
+  if (!saveSession()) {
+    state.started = false;
+    state.startTime = 0;
+    state.endTime = 0;
+    return;
+  }
 
+  $('headerPhase').textContent = `${CONFIG.phaseName} · ${CONFIG.roundName} · ${state.teamName}`;
+  $('brand').setAttribute('data-phase', $('headerPhase').textContent);
   $('timer').hidden = false;
   tick();
   state.timerId = setInterval(tick, 250);
+  state.expiryId = setTimeout(() => submitTest(true), Math.max(0, state.endTime - Date.now()));
 
   $('totalCount').textContent = TOTAL;
   buildTabs();
@@ -273,6 +294,90 @@ function startQuiz() {
 
 function guardUnload(e) {
   if (state.started && !state.submitted) { e.preventDefault(); e.returnValue = ''; }
+}
+
+function saveSession() {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
+      version: 1,
+      started: state.started,
+      submitted: state.submitted,
+      startTime: state.startTime,
+      endTime: state.endTime,
+      current: state.current,
+      answers: state.answers,
+      flagged: [...state.flagged],
+      teamName: state.teamName,
+      result: state.result
+    }));
+    return true;
+  } catch (error) {
+    console.error('Could not save the Technova test session:', error);
+    toast('Your test session could not be saved. Please keep this page open.');
+    return false;
+  }
+}
+
+function restoreSession() {
+  let raw;
+  try {
+    raw = sessionStorage.getItem(STORAGE_KEY);
+  } catch (error) {
+    console.error('Could not restore the Technova test session:', error);
+    toast('Your saved test session could not be accessed.');
+    return;
+  }
+  if (!raw) return;
+
+  let saved;
+  try {
+    saved = JSON.parse(raw);
+  } catch (error) {
+    console.error('Could not parse the saved Technova test session:', error);
+    toast('Your saved test session is invalid.');
+    return;
+  }
+  const validAnswers = saved && Array.isArray(saved.answers) && saved.answers.length === TOTAL &&
+    saved.answers.every((answer, i) => Number.isInteger(answer) && answer >= -1 && answer < QUESTIONS[i].options.length);
+  const validFlags = saved && Array.isArray(saved.flagged) && saved.flagged.every((i) => Number.isInteger(i) && i >= 0 && i < TOTAL);
+  if (!saved || saved.version !== 1 || !saved.started || typeof saved.teamName !== 'string' ||
+      !Number.isFinite(saved.startTime) || !Number.isFinite(saved.endTime) ||
+      !Number.isInteger(saved.current) || saved.current < 0 || saved.current >= TOTAL ||
+      !validAnswers || !validFlags || (saved.submitted && (!saved.result || !Number.isFinite(saved.result.score)))) {
+    console.error('The saved Technova test session has an invalid shape.');
+    toast('Your saved test session is invalid.');
+    return;
+  }
+
+  state.started = true;
+  state.submitted = Boolean(saved.submitted);
+  state.startTime = saved.startTime;
+  state.endTime = saved.endTime;
+  state.current = saved.current;
+  state.answers = saved.answers;
+  state.flagged = new Set(saved.flagged);
+  state.teamName = saved.teamName;
+  state.result = saved.result || null;
+  $('teamName').value = state.teamName;
+  $('headerPhase').textContent = `${CONFIG.phaseName} · ${CONFIG.roundName} · ${state.teamName}`;
+  $('brand').setAttribute('data-phase', $('headerPhase').textContent);
+  $('timer').hidden = false;
+
+  if (state.submitted) {
+    renderResult(state.result);
+    showScreen('resultScreen');
+    $('submissionStatus').textContent = 'Results are available on this page.';
+    return;
+  }
+
+  $('totalCount').textContent = TOTAL;
+  buildTabs();
+  showScreen('quizScreen');
+  renderQuestion(state.current, 'next');
+  window.addEventListener('beforeunload', guardUnload);
+  state.timerId = setInterval(tick, 250);
+  state.expiryId = setTimeout(() => submitTest(true), Math.max(0, state.endTime - Date.now()));
+  tick();
 }
 
 /* ------------------ TIMER ------------------ */
@@ -441,6 +546,7 @@ function updateFlagBtn() {
 function selectOption(i) {
   if (state.submitted) return;
   state.answers[state.current] = i;
+  saveSession();
   document.querySelectorAll('.opt').forEach((el, idx) => {
     el.classList.toggle('selected', idx === i);
     el.setAttribute('aria-checked', idx === i ? 'true' : 'false');
@@ -449,8 +555,9 @@ function selectOption(i) {
 }
 
 function goTo(i) {
-  if (i < 0 || i >= TOTAL || i === state.current) return;
+  if (state.submitted || i < 0 || i >= TOTAL || i === state.current) return;
   renderQuestion(i, i > state.current ? 'next' : 'prev');
+  saveSession();
 }
 
 /* ------------------ OVERVIEW MODAL ------------------ */
@@ -486,26 +593,35 @@ function openConfirm() {
 
 function submitTest(auto = false) {
   if (state.submitted) return;
+  if (Date.now() >= state.endTime) auto = true;
   state.submitted = true;
   clearInterval(state.timerId);
+  clearTimeout(state.expiryId);
   window.removeEventListener('beforeunload', guardUnload);
   $('confirmModal').hidden = true;
   $('overviewModal').hidden = true;
 
   const timeTaken = Math.min(TOTAL_SECONDS, Math.round((Date.now() - state.startTime) / 1000));
 
+  let correct = 0;
+  let wrong = 0;
   let score = 0;
   const per = {};
   SECTIONS.forEach((s) => (per[s.id] = { got: 0, total: 0 }));
   QUESTIONS.forEach((qu, i) => {
     per[qu.sec].total++;
-    if (state.answers[i] === qu.answer) { score++; per[qu.sec].got++; }
+    if (state.answers[i] === qu.answer) { correct++; score += 4; per[qu.sec].got++; }
+    else if (state.answers[i] !== -1) { wrong++; score--; }
   });
   const answered = answeredCount();
+  const result = { score, per, answered, correct, wrong, timeTaken, auto };
+  state.result = result;
+  saveSession();
 
-  renderResult({ score, per, answered, wrong: answered - score, timeTaken, auto });
+  renderResult(result);
   showScreen('resultScreen');
   launchSparks();
+  $('submissionStatus').textContent = 'Results are available on this page.';
 }
 
 function remark(p) {
@@ -515,8 +631,8 @@ function remark(p) {
   return 'Keep practising, you will get there! 🌱';
 }
 
-function renderResult({ score, per, answered, wrong, timeTaken, auto }) {
-  const pct = Math.round((score / TOTAL) * 100);
+function renderResult({ score, per, answered, correct, wrong, timeTaken, auto }) {
+  const pct = Math.max(0, Math.round((score / (TOTAL * 4)) * 100));
   const R = 80, C = 2 * Math.PI * R;
   const show = CONFIG.showScoreAfterSubmit;
 
@@ -530,9 +646,9 @@ function renderResult({ score, per, answered, wrong, timeTaken, auto }) {
         <circle class="ring-fg" id="ringFg" cx="95" cy="95" r="${R}" fill="none" stroke-width="12"
                 stroke-dasharray="${C}" stroke-dashoffset="${C}"/>
       </svg>
-      <div class="ring-text"><b id="scoreNum">0</b><span>out of ${TOTAL}</span></div>
+      <div class="ring-text"><b id="scoreNum">0</b><span>out of ${TOTAL * 4} marks</span></div>
     </div>
-    <p class="marks-line">Marks scored: <b>${score} / ${TOTAL}</b> &middot; ${pct}% &middot; ${remark(pct)}</p>` : '';
+    <p class="marks-line">Marks scored: <b>${score} / ${TOTAL * 4}</b> &middot; ${pct}% &middot; ${remark(pct)}</p>` : '';
 
   const breakdown = show ? `
     <div class="breakdown">
@@ -548,23 +664,44 @@ function renderResult({ score, per, answered, wrong, timeTaken, auto }) {
     <span class="tag">// ${auto ? 'time up · auto-submitted' : 'submission received'}</span>
     <h2>${auto ? "Time's up — test submitted!" : 'Test submitted!'}</h2>
     <p class="sub">${esc(CONFIG.phaseName)} · ${esc(CONFIG.roundName)} &middot; ${esc(CONFIG.eventName)} &middot; 2nd Year</p>
+    <p class="team-result">Team: <b>${esc(state.teamName)}</b></p>
     ${ring}
     <div class="stats">
-      <div class="stat s-ok"><b>${show ? score : '–'}</b>Correct</div>
+      <div class="stat s-ok"><b>${show ? correct : '–'}</b>Correct</div>
       <div class="stat s-bad"><b>${show ? wrong : '–'}</b>Wrong</div>
       <div class="stat s-skip"><b>${TOTAL - answered}</b>Skipped</div>
       <div class="stat s-time"><b>${fmt(timeTaken)}</b>Time</div>
     </div>
     ${breakdown}
+    ${renderAnswerReview()}
     <p class="bye">Thank you for participating in ALGOVERSE 2026. 🎉</p>`;
 
   if (show) {
     requestAnimationFrame(() => setTimeout(() => {
-      $('ringFg').style.strokeDashoffset = C * (1 - score / TOTAL);
+      $('ringFg').style.strokeDashoffset = C * (1 - Math.max(0, score) / (TOTAL * 4));
       document.querySelectorAll('.bk-fill').forEach((f) => (f.style.width = f.dataset.w + '%'));
       animateNumber($('scoreNum'), score, 1500);
     }, 250));
   }
+}
+
+function renderAnswerReview() {
+  return `<section class="answer-review"><h3>Answer review</h3>${QUESTIONS.map((question, index) => {
+    const selected = state.answers[index];
+    const isCorrect = selected === question.answer;
+    const outcome = selected === -1 ? 'Unanswered' : (isCorrect ? 'Correct' : 'Incorrect');
+    const marked = state.flagged.has(index);
+    const visuals = question.visuals.length ? `<div class="review-visuals">${question.visuals.map(renderVisual).join('')}</div>` : '';
+    return `<article class="answer-review-item">
+      <h4>Question ${index + 1}: ${esc(question.text)}</h4>
+      <p class="review-status ${selected === -1 ? 'is-unanswered' : (isCorrect ? 'is-correct' : 'is-incorrect')}">${outcome}${marked ? ' · Marked for review' : ''}</p>
+      ${visuals}<ul>${question.options.map((option, optionIndex) => {
+        const correctOption = optionIndex === question.answer;
+        const chosenOption = optionIndex === selected;
+        return `<li class="${correctOption ? 'review-correct' : ''} ${chosenOption ? 'review-selected' : ''}">${LETTERS[optionIndex]}. ${esc(option)}${correctOption ? ' — Correct answer' : ''}${chosenOption ? ' — Team answer' : ''}</li>`;
+      }).join('')}</ul>
+    </article>`;
+  }).join('')}</section>`;
 }
 
 function animateNumber(el, to, ms) {
@@ -594,19 +731,27 @@ function launchSparks() {
 
 /* ------------------ EVENTS ------------------ */
 function bindEvents() {
+  $('studentDetails').addEventListener('submit', (event) => event.preventDefault());
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.started && !state.submitted) tick();
+  });
   $('enterBtn').addEventListener('click', startQuiz);
   $('prevBtn').addEventListener('click', () => goTo(state.current - 1));
   $('nextBtn').addEventListener('click', () => goTo(state.current + 1));
   $('clearBtn').addEventListener('click', () => {
+    if (state.submitted) return;
     state.answers[state.current] = -1;
     document.querySelectorAll('.opt').forEach((el) => { el.classList.remove('selected'); el.setAttribute('aria-checked', 'false'); });
     refreshNav();
+    saveSession();
   });
   $('flagBtn').addEventListener('click', () => {
+    if (state.submitted) return;
     const i = state.current;
     state.flagged.has(i) ? state.flagged.delete(i) : state.flagged.add(i);
     updateFlagBtn();
     refreshNav();
+    saveSession();
   });
   $('overviewBtn').addEventListener('click', openOverview);
   $('ovClose').addEventListener('click', closeOverview);
@@ -631,4 +776,5 @@ function bindEvents() {
 /* ------------------ INIT ------------------ */
 setupIntro();
 bindEvents();
+restoreSession();
 startRain();
